@@ -57,7 +57,7 @@
       progressUpdated: empty,
       speedUpdated: empty
       },
-      errors = ["BrowserNotSupported", "TooManyFiles", "FileTooLarge", "FileTypeNotAllowed"],
+      errors = ["BrowserNotSupported", "TooManyFiles", "FileTooLarge", "FileTypeNotAllowed","TransportError"],
       doc_leave_timer, stop_loop = false,
       files_count = 0,
       files;
@@ -133,6 +133,7 @@
         return builder;
       }
 
+
       function progress(e) {
         if (e.lengthComputable) {
           var percentage = Math.round((e.loaded * 100) / e.total);
@@ -166,7 +167,7 @@
         if(opts.allowedfiletypes.push && opts.allowedfiletypes.length){
           for(var fileIndex = files.length;fileIndex--;){
             if(!files[fileIndex].type || $.inArray(files[fileIndex].type, opts.allowedfiletypes) < 0){
-              opts.error(errors[3]);
+              opts.error(errors[3],files[fileIndex]);
               return false;
             }
           }
@@ -236,7 +237,7 @@
     	              filesRejected++;
     	              return true;
     	            }
-    	            reader.onloadend = send;
+    	            reader.onloadend = !!window.FormData ? sendWithFormData : sendWithoutFormData;
     	            reader.readAsBinaryString(files[fileIndex]);
 
     	          } else {
@@ -258,7 +259,7 @@
 
             };
 
-        var send = function(e) {
+        var sendWithoutFormData = function(e) {
 
           var fileIndex = ((typeof(e.srcElement) === "undefined") ? e.target : e.srcElement).index
 
@@ -284,6 +285,7 @@
             builder = getBuilder(file.name, e.target.result, mime, boundary);
           }
 
+          xhr.addEventListener("error", function(){opts.error(errors[4],file)}, false);
           upload.index = index;
           upload.file = file;
           upload.downloadStartTime = start_time;
@@ -300,35 +302,116 @@
             xhr.setRequestHeader(k, v);
           });
 
-          xhr.sendAsBinary(builder);
+            xhr.sendAsBinary(builder);
 
-          opts.uploadStarted(index, file, files_count);
+            opts.uploadStarted(index, file, files_count);
 
-          xhr.onload = function() {
-            if (xhr.responseText) {
-              var now = new Date().getTime(),
-                  timeDiff = now - start_time,
-                  result = opts.uploadFinished(index, file, jQuery.parseJSON(xhr.responseText), timeDiff, xhr);
-              filesDone++;
+            xhr.onload = function() {
+              try {
+              if (xhr.responseText) {
+                var now = new Date().getTime(),
+                    timeDiff = now - start_time,
+                    result = opts.uploadFinished(index, file, jQuery.parseJSON(xhr.responseText), timeDiff, xhr);
+                filesDone++;
 
-              // Remove from processing queue
-              processingQueue.forEach(function(value, key) {
-                if (value === fileIndex) processingQueue.splice(key, 1);
-              });
+                // Remove from processing queue
+                processingQueue.forEach(function(value, key) {
+                  if (value === fileIndex) processingQueue.splice(key, 1);
+                });
 
-              // Add to donequeue
-              doneQueue.push(fileIndex);
+                // Add to donequeue
+                doneQueue.push(fileIndex);
 
-              if (filesDone == files_count - filesRejected) {
-                afterAll();
+                if (filesDone == files_count - filesRejected) {
+                  afterAll();
+                }
+                if (result === false) stop_loop = true;
               }
-              if (result === false) stop_loop = true;
-            }
-          };
+              } catch(e){
+                opts.error(errors[4],file);
+              }
+            };
 
         }
 
-        // Initiate the processing loop
+        var sendWithFormData = function(e) {
+          var evt = e;
+          var fileIndex = ((typeof(e.srcElement) === "undefined") ? e.target : e.srcElement).index
+
+          // Sometimes the index is not attached to the
+          // event object. Find it by size. Hack for sure.
+          if (e.target.index == undefined) {
+            e.target.index = getIndexBySize(e.total);
+          }
+
+          var file = files[e.target.index],
+              upload_data = new FormData,
+              index = e.target.index,
+              start_time = new Date().getTime(),
+              newName = rename(file.name);
+
+          if (typeof newName !== "string") {
+            newName = file.name;
+          }
+
+          upload_data.append('utf-8',"✓");
+          $.each(opts.data, function(key,value) {
+            upload_data.append(decodeURI(key),decodeURI(value))
+          })
+
+          if(file && file instanceof File) {
+            upload_data.append(opts.paramname,file);
+
+            var ajax = $.ajax({
+              type : "POST", 
+              url : opts.url,
+              beforeSend : function(xhr,o){
+                $.each(opts.headers, function(k, v) {
+                  xhr.setRequestHeader(k, v);
+                });
+                o.data = upload_data;
+              },
+              xhr: function() {
+                var xhr = jQuery.ajaxSettings.xhr();
+                if(xhr instanceof window.XMLHttpRequest) {
+                    xhr.upload.addEventListener('progress', progress, false);
+                }
+                return xhr;
+              },
+              processData: false,
+              contentType: false,
+              cache:false,
+              data : null,
+              error : function(xhr,text,errThrown){
+                opts.error(errors[4],file);
+              },
+              success : function(transport,text,xhr) {
+                var now = new Date().getTime(),
+                    timeDiff = now - start_time,
+                    result = opts.uploadFinished(index, file, transport, timeDiff, xhr);
+                filesDone++;
+
+                // Remove from processing queue
+                processingQueue.forEach(function(value, key) {
+                  if (value === fileIndex) processingQueue.splice(key, 1);
+                });
+
+                // Add to donequeue
+                doneQueue.push(fileIndex);
+
+                if (filesDone == files_count - filesRejected) {
+                  afterAll();
+                }
+                if (result === false) stop_loop = true;
+              }
+
+            })
+            opts.uploadStarted(index, file, files_count);
+          } else {
+            opts.error(errors[4],file)
+          }
+
+        };
         process();
 
       }
